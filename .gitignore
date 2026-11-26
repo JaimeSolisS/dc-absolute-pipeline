@@ -1,0 +1,28 @@
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local data
+raw_data.csv
+data/
+
+# Testing and linting
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+# macOS
+.DS_Store
+
+# GCP credentials
+credentials.json
+service-account.json
