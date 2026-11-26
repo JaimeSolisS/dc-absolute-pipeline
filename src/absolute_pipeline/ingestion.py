@@ -1,4 +1,5 @@
 from google.cloud import bigquery
+import datetime
 
 def prepare_volume_records(volumes, run_id, extracted_at):
     records = []
@@ -33,3 +34,18 @@ def load_volume_records(client, records, table_id):
     print(job.output_rows)
     print(job.errors)
     return job
+
+def persist_volume_changes(client: bigquery.Client, changes: dict[str, list[dict]], table_id: str, run_id: str,extracted_at: datetime) -> int:
+
+    changed_volumes = changes["new"] + changes["updated"]
+
+    if not changed_volumes:
+        return 0
+
+    records = prepare_volume_records(changed_volumes, run_id, extracted_at)
+
+    job = load_volume_records(client, records, table_id)
+
+    return job.output_rows
+ 
+
