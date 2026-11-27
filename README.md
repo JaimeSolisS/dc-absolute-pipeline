@@ -4,7 +4,9 @@ An end-to-end data engineering project designed to collect, process, store, and 
 
 The project focuses on incremental data ingestion, efficient API consumption, data quality, historical tracking, cloud infrastructure, and automated data pipelines.
 
-**Project status:** In development — Incremental Volume Ingestion.
+**Project status:** In development — Incremental Volume Ingestion implemented; Issue Synchronization Design next.
+
+**Last updated:** November 26, 2026.
 
 ## Overview
 
@@ -36,20 +38,27 @@ The project is also intended as a hands-on learning experience covering the comp
 
 ```mermaid
 flowchart TD
-    A[Comic Vine API] --> B[Python Extraction]
-    B --> C[BigQuery Bronze Volumes]
-    C --> D[Control State Initialization]
-    D --> E[BigQuery Control Volumes]
+    A[Comic Vine API] --> B[Paginated Volume Extraction]
     B --> F[Volume Change Detection]
-    E --> F
+    E[BigQuery Control Volumes] --> F
     F --> G[New Records]
     F --> H[Updated Records]
     F --> I[Unchanged Records]
+    G --> P[Incremental Bronze Persistence]
+    H --> P
+    P --> C[BigQuery Bronze Volumes]
+    P --> U[Prepare Control Updates]
+    I --> U
+    U --> S[Control Volumes Staging]
+    S --> M[BigQuery MERGE]
+    M --> E
 ```
 
-Initial volume ingestion, control state initialization, and volume change detection have been implemented.
+Initial volume ingestion, control initialization, reusable Python modules, change detection, incremental Bronze persistence, and Control update logic have been developed. Final end-to-end validation remains pending.
 
-Incremental persistence and reusable Python modules are the next development steps.
+The latest extraction returned 174 unchanged volumes, including 23 tracked volumes. No new Bronze versions were required.
+
+The next step is independent issue synchronization state.
 
 ### Target Architecture
 
@@ -67,7 +76,7 @@ flowchart TD
         IC[Issue Change Detection]
         ID[Issue Details Extraction]
 
-        V --> VC --> I --> IC --> ID
+        V --> VC --> VS[Volume Issue Sync Selection] --> I --> IC --> DS[Issue Detail Sync Selection] --> RL[Rate Limiter] --> ID
     end
 
     subgraph VariantCoverPipeline
@@ -81,8 +90,8 @@ flowchart TD
     CV --> V
     LOCG --> SM
 
-    V --> B
-    I --> B
+    VC --> B
+    IC --> B
     ID --> B
     VD --> B
 
@@ -115,7 +124,7 @@ The target architecture is subject to refinement as the project evolves. The orc
 | Google BigQuery       | Data warehouse                        | Implemented      |
 | hashlib / SHA-256     | Record change detection               | Implemented      |
 | BeautifulSoup         | Variant cover HTML parsing            | Proof of concept |
-| Hatchling             | Python package management             | Planned          |
+| Hatchling             | Python package management             | Implemented      |
 | pytest                | Automated testing                     | Planned          |
 | Ruff                  | Linting and formatting                | Planned          |
 | dbt                   | Data transformation                   | Planned          |
@@ -154,7 +163,13 @@ A preliminary tracking rule identifies relevant volumes using:
 
 This rule is provisional and will eventually be replaced or complemented by an explicitly maintained catalog of tracked volumes.
 
-Raw source records are preserved independently of these filtering rules.
+Raw source records are preserved independently of these filtering rules. All discovered volumes remain in Bronze and Control; only tracked volumes are eligible for downstream issue extraction. This design was explicitly retained rather than restricting Bronze or Control to tracked volumes.
+
+### Comic Vine Usage Constraints
+
+The supplied Terms of Use specify non-commercial use, 200 requests per resource per hour, velocity detection, response caching recommendations, attribution with links back to Comic Vine, and restrictions on competing products, manipulation, reproduction, and redistribution.
+
+The project is a personal learning exercise. Clarification of permitted storage, transformation, and application use remains pending. Further source-data expansion and publication are conditional on appropriate permissions. Non-commercial use alone does not establish permission for redistribution.
 
 ### League of Comic Geeks
 
@@ -347,6 +362,24 @@ The staging load uses an explicit schema and `WRITE_TRUNCATE`.
 
 Existing control records are not overwritten during initialization.
 
+#### Incremental Control Synchronization
+
+After successful Bronze persistence, prepare Control records, load staging using the explicit target schema and `WRITE_TRUNCATE`, validate the loaded row count, and execute an upsert MERGE. New records are inserted; existing records are updated. Unchanged records advance `last_checked_at` without advancing `last_fetched_at` or changing the source hash. The shared staging table assumes a single active execution.
+
+#### Planned Issue Synchronization State
+
+The next task is to extend `control.volumes` and its staging schema:
+
+| Column                      | Type      | Purpose                                                               |
+| --------------------------- | --------- | --------------------------------------------------------------------- |
+| `issues_sync_pending`       | BOOL      | Pending downstream issue synchronization                              |
+| `issues_last_synced_at`     | TIMESTAMP | Last successful issue synchronization                                 |
+| `issues_synced_volume_hash` | STRING    | Volume hash associated with the last successful issue synchronization |
+
+These fields are proposed, not yet implemented. Initialize the 23 tracked volumes as pending and leave untracked volumes ineligible. Preserve pending work across volume updates and failures. Mark synchronization complete only after successful issue extraction, Bronze persistence, and issue Control updates.
+
+Select tracked volumes when they have never synchronized issues, have pending work, have a different current hash from their last synchronized hash, or are due for periodic reconciliation. Newly tracked volumes must also be eligible for initial synchronization.
+
 ### Silver Layer
 
 The Silver layer will contain cleaned, standardized, and deduplicated source data.
@@ -445,11 +478,11 @@ Records are classified into three categories:
 | Updated   | Record exists but its hash has changed            |
 | Unchanged | Record exists and its hash is identical           |
 
-Volume change detection has been implemented and validated using mock records.
+Volume change detection has been implemented and validated using mock records and a real extraction returning 174 unchanged records.
 
 ### Incremental Persistence
 
-The planned persistence strategy is:
+The implemented persistence strategy is:
 
 | Record category | Bronze action      | Control action                |
 | --------------- | ------------------ | ----------------------------- |
@@ -460,6 +493,32 @@ The planned persistence strategy is:
 Control state must only be advanced after the corresponding Bronze persistence succeeds.
 
 Records missing from a source response must not automatically be treated as deleted.
+
+### Latest Volume Execution
+
+| Metric                   | Count |
+| ------------------------ | ----: |
+| Discovered volumes       |   174 |
+| Tracked volumes          |    23 |
+| Untracked volumes        |   151 |
+| New volumes              |     0 |
+| Updated volumes          |     0 |
+| Unchanged volumes        |   174 |
+| Required Bronze writes   |     0 |
+| Prepared Control records |   174 |
+
+`persist_volume_changes()` skips the Bronze load when there are no changes. The new and updated paths and final Control MERGE results still require end-to-end validation.
+
+### Reusable Python Functions
+
+| Responsibility     | Functions                                                                                                                                                                                                      |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| API extraction     | `fetch_paginated_results()`                                                                                                                                                                                    |
+| Hashing            | `calculate_record_hash()`                                                                                                                                                                                      |
+| Bronze persistence | `prepare_volume_records()`, `load_volume_records()`, `persist_volume_changes()`                                                                                                                                |
+| Control state      | `get_control_state()`, `prepare_control_records()`, `load_staging_records()`, `detect_volume_changes()`, `prepare_volume_control_updates()`, `merge_volume_control_records()`, `update_volume_control_state()` |
+
+The paginated extraction supports configurable base URL, endpoint, filters, page size and delay, HTTP timeout, HTTP and API status validation, and unexpected empty-page detection. HTTP mock tests are deferred.
 
 ### API Consumption Optimization
 
@@ -496,6 +555,18 @@ Assume:
 Under these assumptions, incremental extraction reduces API requests by approximately 99%.
 
 Actual request counts depend on pagination, retries, reconciliation, and source behavior.
+
+### Current API Budget and Rate Limiting Decision
+
+| Resource      | Initial extraction        | Subsequent extraction                               |
+| ------------- | ------------------------- | --------------------------------------------------- |
+| Volumes       | Approximately 2 requests  | Approximately 2 requests                            |
+| Issues        | Approximately 23 requests | Selected tracked volumes only                       |
+| Issue details | One request per issue     | New, changed, pending, or reconciliation candidates |
+
+Estimates assume 100 records per page, one issue-list page per tracked volume, and no retries. The current configurable two-second pagination delay is not a complete hourly rate limiter. Request delays must also be considered between separate volume requests.
+
+A dedicated rate limiter and persistent API usage tracking are deferred until before issue detail ingestion, when the initial historical load may exceed 200 requests per resource per hour. The implementation will account for per-resource budgets, retries, velocity restrictions, and resumable backfills. All stages must respect the source limits even before a dedicated limiter exists.
 
 ### Failure Recovery
 
@@ -663,10 +734,13 @@ absolute-pipeline/
 ├── notebooks/
 │   ├── 01_comicvine_exploration.ipynb
 │   ├── 02_incremental_ingestion.ipynb
-│   └── 03_locg_exploration.ipynb
-├── src/                         # Planned modularization
+│   ├── 03_locg_exploration.ipynb
+│   └── 04_incremental_volume_pipeline.ipynb
+├── src/
 │   └── absolute_pipeline/
 │       ├── __init__.py
+│       ├── comicvine.py
+│       ├── control.py
 │       ├── utils.py
 │       └── ingestion.py
 ├── tests/                       # Planned
@@ -742,6 +816,7 @@ Recommended notebook execution order:
 
 1. `01_comicvine_exploration.ipynb`
 2. `02_incremental_ingestion.ipynb`
+3. `04_incremental_volume_pipeline.ipynb` (current incremental workflow)
 
 The notebooks currently contain exploratory and implementation code.
 
@@ -761,6 +836,8 @@ Completed validation scenarios:
 - Empty incoming records.
 - Empty control state.
 - All incoming records unchanged.
+
+The real-data unchanged scenario and Control record preparation have also been exercised. HTTP mocks were intentionally skipped for now; automated tests and final persistence validation remain pending.
 
 Future automated tests will cover:
 
@@ -814,19 +891,28 @@ Tests should avoid unnecessary external API requests by using mock responses and
 - [x] Implement control state retrieval.
 - [x] Implement volume change detection.
 - [x] Validate change detection using mock records.
-- [ ] Configure Python package structure.
-- [ ] Extract reusable functions from notebooks.
-- [ ] Implement incremental Bronze persistence.
-- [ ] Implement incremental control state updates.
-- [ ] Update verification timestamps for unchanged records.
-- [ ] Implement idempotent execution.
+- [x] Configure Python package structure.
+- [x] Extract reusable functions from notebooks.
+- [x] Implement incremental Bronze persistence.
+- [x] Implement incremental control state updates.
+- [x] Update verification timestamps for unchanged records.
+- [x] Implement reusable paginated API extraction.
+- [x] Validate real-data unchanged classification.
+- [x] Retain all discovered volumes in Bronze and Control.
+- [ ] Validate real new and updated persistence paths.
+- [ ] Implement and validate idempotent execution.
 - [ ] Validate failure recovery.
 - [ ] Add automated unit tests.
 - [ ] Validate complete incremental volume ingestion.
 
 ### Phase 3 — Incremental Issue Ingestion
 
-**Status: Planned**
+**Status: Next development focus**
+
+- [ ] Add issue synchronization fields to `control.volumes`.
+- [ ] Align staging schema and Control update logic.
+- [ ] Initialize pending state for tracked volumes.
+- [ ] Validate selection of the initial 23 tracked volumes without additional API requests.
 
 - [ ] Explore Comic Vine issue endpoints.
 - [ ] Validate issue filtering and pagination.
@@ -847,6 +933,8 @@ Tests should avoid unnecessary external API requests by using mock responses and
 
 **Status: Planned**
 
+- [ ] Implement per-resource API usage tracking and rate limiting.
+- [ ] Implement resumable backfill and configurable request budgets.
 - [ ] Explore issue detail endpoints.
 - [ ] Design Bronze issue detail schema.
 - [ ] Design issue detail control schema.
@@ -970,37 +1058,43 @@ Tests should avoid unnecessary external API requests by using mock responses and
 
 ## Current Development Focus
 
-The immediate priority is completing incremental volume ingestion.
+Resume in `notebooks/04_incremental_volume_pipeline.ipynb`.
 
 Next steps:
 
-1. Configure the reusable Python package.
-2. Move existing ingestion and hashing functions out of the notebooks.
-3. Implement incremental Bronze persistence.
-4. Implement control state updates.
-5. Validate idempotency and failure recovery.
-6. Continue with incremental issue ingestion.
+1. Confirm the latest volume Control MERGE and commit outstanding code changes.
+2. Inspect and extend `control.volumes` with the three proposed issue synchronization fields.
+3. Align the staging schema and update Control preparation and MERGE logic.
+4. Initialize pending synchronization for tracked volumes.
+5. Implement and validate selection of the 23 tracked volumes without new API requests.
+6. Create Bronze and Control issue tables and proceed with issue extraction once source usage is clarified.
+
+Dedicated API rate limiting is deferred until before issue detail ingestion. Final volume persistence and failure recovery validation remain outstanding.
 
 Variant cover extraction has demonstrated initial technical feasibility but will remain deferred until the primary Comic Vine pipeline is completed.
 
 ## Project Status
 
-| Component                         | Status                     |
-| --------------------------------- | -------------------------- |
-| Comic Vine exploration            | Completed                  |
-| Initial volume ingestion          | Completed                  |
-| BigQuery Bronze setup             | Completed                  |
-| Volume control initialization     | Completed                  |
-| Volume change detection           | Completed                  |
-| Python package modularization     | Next step                  |
-| Incremental volume persistence    | Pending                    |
-| Incremental issue ingestion       | Planned                    |
-| Issue detail ingestion            | Planned                    |
-| dbt transformations               | Planned                    |
-| Infrastructure and orchestration  | Planned                    |
-| LoCG technical exploration        | Proof of concept completed |
-| Variant cover production pipeline | Deferred                   |
-| Serving layer                     | Planned                    |
-| Web application                   | Planned                    |
+| Component                         | Status                          |
+| --------------------------------- | ------------------------------- |
+| Comic Vine exploration            | Completed                       |
+| Initial volume ingestion          | Completed                       |
+| BigQuery Bronze setup             | Completed                       |
+| Volume control initialization     | Completed                       |
+| Volume change detection           | Completed                       |
+| Python package modularization     | Implemented                     |
+| Incremental volume persistence    | Implemented; validation pending |
+| Volume Control synchronization    | Implemented; validation pending |
+| Independent issue sync state      | Next step                       |
+| API rate limiting                 | Deferred until issue details    |
+| Source usage clarification        | Pending                         |
+| Incremental issue ingestion       | Planned                         |
+| Issue detail ingestion            | Planned                         |
+| dbt transformations               | Planned                         |
+| Infrastructure and orchestration  | Planned                         |
+| LoCG technical exploration        | Proof of concept completed      |
+| Variant cover production pipeline | Deferred                        |
+| Serving layer                     | Planned                         |
+| Web application                   | Planned                         |
 
 This project is being developed incrementally as a practical exploration of modern data engineering patterns, cloud services, and efficient data ingestion strategies.
